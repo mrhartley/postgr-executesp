@@ -1,0 +1,45 @@
+<assembly xmlns="http://maven.apache.org/plugins/maven-assembly-plugin/assembly/1.1.2"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://maven.apache.org/plugins/maven-assembly-plugin/assembly/1.1.2 http://maven.apache.org/xsd/assembly-1.1.2.xsd">
+
+  <id>dist</id>
+  <formats>
+    <format>jar</format>
+  </formats>
+  <includeBaseDirectory>false</includeBaseDirectory>
+
+  <dependencySets>
+    <!-- Add jar dependencies to META-INF/lib -->
+    <dependencySet>
+      <outputDirectory>/META-INF/lib</outputDirectory>
+      <includes>
+        <include>org.postgresql:postgresql</include>
+      </includes>
+    </dependencySet>
+
+    <!-- Add unpacked classes and resources -->
+    <dependencySet>
+      <unpack>true</unpack>
+      <includes>
+        <include>com.appiancorp.plugins:executestoredprocedure</include>
+      </includes>
+    </dependencySet>
+  </dependencySets>
+
+  <!-- Add system dependencies -->
+  <files>
+    <file>
+      <source>${basedir}/build-tools/lib/typetransformer/typetransformer-1.2.jar</source>
+      <outputDirectory>/META-INF/lib</outputDirectory>
+    </file>
+  </files>
+
+  <!-- Add sources -->
+  <fileSets>
+    <fileSet>
+      <directory>${build.sourceDirectory}</directory>
+      <outputDirectory>/src</outputDirectory>
+    </fileSet>
+  </fileSets>
+
+</assembly>

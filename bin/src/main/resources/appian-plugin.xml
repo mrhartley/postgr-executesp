@@ -1,0 +1,20 @@
+<appian-plugin name="Execute Stored Procedure" key="executestoredprocedureor">
+
+  <plugin-info>
+    <description>Execute Stored Procedure</description>
+    <vendor name="Appian Corporation" url="http://www.appian.com" />
+    <version>${project.version}</version>
+    <application-version min="16.1" />
+  </plugin-info>
+
+  <datatype key="ProcedureInput" name="ProcedureInput">
+    <class>com.appiancorp.ps.function.ProcedureInput</class>
+  </datatype>
+
+  <smart-service name="Execute Stored Procedure" key="ExecuteStoredProcedure" class="com.appiancorp.ps.ss.ExecuteStoredProcedurev1" />
+  <smart-service name="Execute Stored Procedure" key="ExecuteStoredProcedurev2" class="com.appiancorp.ps.ss.ExecuteStoredProcedure" />
+  <smart-service name="Execute Stored Function" key="ExecuteStoredFunction" class="com.appiancorp.ps.ss.ExecuteStoredFunction" />
+
+  <function key="executestoredprocedurefunction" class="com.appiancorp.ps.function.ExecuteStoredProcedureFunction" />
+
+</appian-plugin>

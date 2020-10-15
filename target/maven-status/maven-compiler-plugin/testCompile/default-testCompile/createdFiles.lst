@@ -1,0 +1,3 @@
+com\appiancorp\ps\function\ExecuteStoredProcedureFunctionTest.class
+com\appiancorp\ps\util\MockServiceLocator.class
+com\appiancorp\ps\db\Procedures.class
