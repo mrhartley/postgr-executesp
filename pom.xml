@@ -3,25 +3,15 @@
 
   <groupId>com.appiancorp.plugins</groupId>
   <artifactId>executestoredprocedure</artifactId>
-  <version>1.5.2-SNAPSHOT</version>
+  <version>1.5.3</version>
   <packaging>jar</packaging>
   <name>Execute Stored Procedure</name>
   <url>https://github.com/appianps/ps-plugin-ExecuteStoredProcedure</url>
 
-  <scm>
-    <connection>scm:git:git://github.com/appianps/ps-plugin-ExecuteStoredProcedure</connection>
-    <url>https://github.com/appianps/ps-plugin-ExecuteStoredProcedure</url>
-    <tag>HEAD</tag>
-  </scm>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
-
-  <organization>
-    <name>Appian Corporation</name>
-    <url>http://www.appian.com/</url>
-  </organization>
 
   <dependencies>
     <dependency>

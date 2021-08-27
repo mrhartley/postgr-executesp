@@ -15,6 +15,7 @@ import java.util.Map;
 import javax.naming.Context;
 import javax.naming.NamingException;
 
+import com.appiancorp.ps.ESPUtils;
 import org.apache.log4j.Logger;
 
 import com.appiancorp.exceptions.ObjectNotFoundException;
@@ -61,6 +62,10 @@ public class ExecuteStoredFunction extends AppianSmartService {
   private HashMap<Integer, ActivityClassParameter> resultSetList = new HashMap<Integer, ActivityClassParameter>();
   private final SecureCredentialsStore scs;
   private String externalSystemKey;
+
+  private static Integer DEFAULT_TIMEOUT_SECS = 14400; //4 hours
+  private static final String DEFAULT_PLATFORM_SCS_KEY = "settings.executestoredprocedure"; //to ensure backwards compatibility and to remove the need to refactor existing functions, decided to have a fixed-name scs key for this plug-in
+  private static final String DEFAULT_SCS_TIMEOUT_KEY = "timeout";
 
   public ExecuteStoredFunction(SmartServiceContext ctx, ProcessExecutionService pes, TypeService ts, Context initialCtx,
     SecureCredentialsStore scs)
@@ -307,6 +312,13 @@ public class ExecuteStoredFunction extends AppianSmartService {
       String SQL = "{call " + procedureName + "(" + getParameters() + " )}";
       CallableStatement cstmt = conn.prepareCall(SQL);
 
+
+        Map<String, String> config = scs.getSystemSecuredValues(DEFAULT_PLATFORM_SCS_KEY);
+
+        Integer timeout = ESPUtils.getTimeoutSecs(config.get(DEFAULT_SCS_TIMEOUT_KEY));
+
+        cstmt.setQueryTimeout(timeout);
+
       for (int i = 0; i < parameterList.size(); i++) {
         int paramIndex = i + 1;
         ProcedureParameter param = parameterList.get(i);
@@ -383,6 +395,7 @@ public class ExecuteStoredFunction extends AppianSmartService {
 
       perf.track(Metric.TRANSFORM);
       perf.trackRowCount(totalRowCount);
+      perf.finish();
     } catch (Exception e) {
       LOG.error("Error during execution", e);
 
@@ -393,8 +406,6 @@ public class ExecuteStoredFunction extends AppianSmartService {
         throw new SmartServiceException.Builder(ExecuteStoredFunction.class, e).build();
       }
     } finally {
-      perf.finish();
-
       try {
         conn.close();
         LOG.debug("Connection closed");

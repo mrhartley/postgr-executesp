@@ -9,11 +9,14 @@ import java.sql.Types;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import javax.naming.Context;
 import javax.naming.NamingException;
 import javax.sql.DataSource;
 
+import com.appiancorp.ps.ESPUtils;
+import com.appiancorp.suiteapi.security.external.SecureCredentialsStore;
 import org.apache.log4j.Logger;
 
 import com.appiancorp.ps.performance.PerformanceTracker;
@@ -56,8 +59,14 @@ public class ExecuteStoredProcedure extends AppianSmartService {
   private String fullProcedureName;
   private List<ProcedureParameter> parameterList = new ArrayList<ProcedureParameter>();
   private HashMap<Integer, ActivityClassParameter> resultSetList = new HashMap<Integer, ActivityClassParameter>();
+  private final SecureCredentialsStore scs;
 
-  public ExecuteStoredProcedure(SmartServiceContext ctx, ProcessExecutionService pes, TypeService ts, Context initialCtx)
+
+  private static Integer DEFAULT_TIMEOUT_SECS = 14400; //4 hours
+  private static final String DEFAULT_PLATFORM_SCS_KEY = "settings.executestoredprocedure"; //to ensure backwards compatibility and to remove the need to refactor existing functions, decided to have a fixed-name scs key for this plug-in
+  private static final String DEFAULT_SCS_TIMEOUT_KEY = "timeout";
+
+  public ExecuteStoredProcedure(SmartServiceContext ctx, ProcessExecutionService pes, TypeService ts, Context initialCtx, SecureCredentialsStore scs)
     throws SQLException, NamingException {
     super();
 
@@ -66,6 +75,7 @@ public class ExecuteStoredProcedure extends AppianSmartService {
     this.ts = ts;
     this.initialCtx = initialCtx;
     this.processId = ctx.getProcessProperties().getId();
+    this.scs = scs;
   }
 
   @Override
@@ -283,6 +293,12 @@ public class ExecuteStoredProcedure extends AppianSmartService {
       conn.setAutoCommit(true);
 
       CallableStatement call = conn.prepareCall("{call " + procedureName + "(" + getParameters() + ")}");
+
+      Map<String, String> config = scs.getSystemSecuredValues(DEFAULT_PLATFORM_SCS_KEY);
+
+      Integer timeout = ESPUtils.getTimeoutSecs(config.get(DEFAULT_SCS_TIMEOUT_KEY));
+
+      call.setQueryTimeout(timeout);
 
       for (int i = 0; i < parameterList.size(); i++) {
         int paramIndex = i + 1;

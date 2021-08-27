@@ -1,15 +1,6 @@
-package com.appiancorp.ps.function;
+  package com.appiancorp.ps.function;
 
-import java.sql.CallableStatement;
-import java.sql.Connection;
-import java.sql.DatabaseMetaData;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
-import java.sql.Savepoint;
-import java.sql.Timestamp;
-import java.sql.Types;
+import java.sql.*;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -20,6 +11,9 @@ import javax.naming.InitialContext;
 import javax.sql.DataSource;
 import javax.xml.datatype.XMLGregorianCalendar;
 
+import com.appiancorp.exceptions.InsufficientPrivilegesException;
+import com.appiancorp.exceptions.ObjectNotFoundException;
+import com.appiancorp.ps.ESPUtils;
 import org.apache.log4j.Logger;
 
 import com.appiancorp.plugins.typetransformer.AppianList;
@@ -44,19 +38,33 @@ import com.appiancorp.suiteapi.type.TypedValue;
  *               - Added new ExecuteStoredFunction to handle PostgreSQL Statement functions where driver needs to be specified in the 3rd
  *               party credentials.
  */
+
 @AppianScriptingFunctionsCategory
 public class ExecuteStoredProcedureFunction {
   private static final int TYPE_ORACLE_CURSOR = -10;
   private static final Logger LOG = Logger.getLogger(ExecuteStoredProcedureFunction.class);
+  private static final String DEFAULT_PLATFORM_SCS_KEY = "settings.executestoredprocedure"; //to ensure backwards compatibility and to remove the need to refactor existing functions, decided to have a fixed-name scs key for this plug-in
+  private static final String DEFAULT_SCS_TIMEOUT_KEY = "timeout";
+  private static AppianList emptyResults = null;
 
   @Function
-  public TypedValue executeStoredProcedure(InitialContext ctx, TypeService ts, @Parameter(required = true) String dataSourceName,
-    @Parameter(required = true) String procedureName, @Parameter(required = false) ProcedureInput[] inputs) {
+  public TypedValue executeStoredProcedure(SecureCredentialsStore scs, InitialContext ctx, TypeService ts,
+                                           @Parameter(required = true) String dataSourceName,
+                                           @Parameter(required = true) String procedureName,
+                                           @Parameter(required = false) ProcedureInput[] inputs) throws InsufficientPrivilegesException, ObjectNotFoundException, ClassNotFoundException {
 
     PerformanceTracker perf = new PerformanceTracker(dataSourceName, procedureName);
     AppianTypeFactory tf = AppianTypeFactory.newInstance(ts);
     AppianObject returnValue = (AppianObject) tf.createElement(AppianType.DICTIONARY);
     AppianList emptyResults = null;
+
+
+    //Get platform level settings from the secure credential store (timeout value in seconds)
+
+    Map<String, String> config = scs.getSystemSecuredValues(DEFAULT_PLATFORM_SCS_KEY);
+    Integer timeout = ESPUtils.getTimeoutSecs(config.get(DEFAULT_SCS_TIMEOUT_KEY));
+
+
 
     try {
       if (procedureName == null || procedureName.isEmpty()) {
@@ -69,11 +77,10 @@ public class ExecuteStoredProcedureFunction {
 
       // Retrieve the database connection and validate initial values
       DataSource ds = (DataSource) ctx.lookup(dataSourceName);
-
       perf.track(Metric.DS_LOOKUP);
 
       try (Connection conn = ds.getConnection()) {
-        return executeStoredProcedure(conn, perf, tf, returnValue, procedureName, inputs);
+        return executeStoredProcedure(conn, perf, tf, returnValue, procedureName, inputs, timeout);
       }
     } catch (Throwable e) {
       LOG.error("Error executing: ", e);
@@ -82,16 +89,14 @@ public class ExecuteStoredProcedureFunction {
       returnValue.put("parameters", emptyResults);
       returnValue.put("result", emptyResults);
       return tf.toTypedValue(returnValue);
-    } finally {
-      perf.finish();
     }
   }
 
   @Function
   public TypedValue executeStoredFunction(SecureCredentialsStore scs, TypeService ts,
-    @Parameter(required = true) String scsKey,
-    @Parameter(required = true) String procedureName,
-    @Parameter(required = false) ProcedureInput[] inputs) {
+                                          @Parameter(required = true) String scsKey,
+                                          @Parameter(required = true) String procedureName,
+                                          @Parameter(required = false) ProcedureInput[] inputs) {
 
     PerformanceTracker perf = new PerformanceTracker(scsKey, procedureName);
     AppianTypeFactory tf = AppianTypeFactory.newInstance(ts);
@@ -112,8 +117,10 @@ public class ExecuteStoredProcedureFunction {
 
       Class.forName(config.get("driver"));
 
+      Integer timeout = ESPUtils.getTimeoutSecs(config.get(DEFAULT_SCS_TIMEOUT_KEY));
+
       try (Connection conn = DriverManager.getConnection(config.get("url"), config.get("username"), config.get("password"))) {
-        return executeStoredFunction(conn, perf, tf, returnValue, procedureName, inputs);
+        return executeStoredFunction(conn, perf, tf, returnValue, procedureName, inputs, timeout);
       }
 
     } catch (Throwable e) {
@@ -123,14 +130,13 @@ public class ExecuteStoredProcedureFunction {
       returnValue.put("parameters", emptyResults);
       returnValue.put("result", emptyResults);
       return tf.toTypedValue(returnValue);
-    } finally {
-      perf.finish();
     }
 
   }
 
+
   private TypedValue executeStoredFunction(Connection conn, PerformanceTracker perf, AppianTypeFactory tf, AppianObject returnValue,
-    String functionName, ProcedureInput[] inputs) throws Exception {
+    String functionName, ProcedureInput[] inputs, Integer timeout) throws Exception {
     perf.track(Metric.DS_GET_CONNECTION);
 
     String fqFunctionName = functionName;
@@ -145,124 +151,135 @@ public class ExecuteStoredProcedureFunction {
 
     String SQL = "SELECT * FROM " + fqFunctionName + " (" + getParameters(validatedParameters) + " )";
 
-    PreparedStatement pstmt = conn.prepareStatement(SQL);
+    try(PreparedStatement pstmt = conn.prepareStatement(SQL)) {
 
-    /* Set parameters */
-    setParameters(validatedParameters);
+      pstmt.setQueryTimeout(timeout);
 
-    for (int i = 0; i < validatedParameters.size(); i++) {
-      int paramIndex = i + 1;
-      ProcedureParameter param = validatedParameters.get(i);
+      /* Set parameters */
+      setParameters(validatedParameters);
 
-      if (param.isInput()) {
-        if (param.getValue() == null) {
-          pstmt.setNull(paramIndex, param.getSQLDataType());
-        } else {
-          if (param.getValue() instanceof XMLGregorianCalendar) {
-            XMLGregorianCalendar cal = (XMLGregorianCalendar) param.getValue();
+      for (int i = 0; i < validatedParameters.size(); i++) {
+        int paramIndex = i + 1;
+        ProcedureParameter param = validatedParameters.get(i);
 
-            Timestamp timestamp = new Timestamp(cal.toGregorianCalendar().getTimeInMillis());
-
-            pstmt.setObject(paramIndex, timestamp);
+        if (param.isInput()) {
+          if (param.getValue() == null) {
+            pstmt.setNull(paramIndex, param.getSQLDataType());
           } else {
-            pstmt.setObject(paramIndex, param.getValue());
+            if (param.getValue() instanceof XMLGregorianCalendar) {
+              XMLGregorianCalendar cal = (XMLGregorianCalendar) param.getValue();
+
+              Timestamp timestamp = new Timestamp(cal.toGregorianCalendar().getTimeInMillis());
+
+              pstmt.setObject(paramIndex, timestamp);
+            } else {
+              pstmt.setObject(paramIndex, param.getValue());
+            }
           }
         }
-      }
 
-      if (param.isOutput()) {
-        LOG.debug(functionName + " registering output " + param.getParameterName());
-        ((CallableStatement) pstmt).registerOutParameter(paramIndex, param.getSQLDataType());
-      }
-    }
-
-    perf.track(Metric.PREPARE);
-
-    // execution
-    boolean hasResultSet = pstmt.execute();
-
-    perf.track(Metric.EXECUTE);
-
-    // parameters
-    AppianObject parameters = (AppianObject) tf.createElement(AppianType.DICTIONARY);
-    long totalRowCount = 0;
-    int pos = 1;
-
-    for (ProcedureParameter param : validatedParameters) {
-      if (param.isOutput()) {
-        if (((CallableStatement) pstmt).getObject(pos) == null) {
-          parameters.put(param.getParameterName(), null);
-          continue;
-        }
-
-        switch (param.getSQLDataType()) {
-        case Types.VARCHAR:
-        case Types.NVARCHAR:
-        case Types.NCHAR:
-        case Types.CHAR:
-        case Types.LONGNVARCHAR:
-        case Types.LONGVARCHAR:
-          parameters.put(param.getParameterName(), tf.createString(((CallableStatement) pstmt).getString(pos)));
-          break;
-        case Types.DECIMAL:
-        case Types.DOUBLE:
-        case Types.FLOAT:
-        case Types.NUMERIC:
-        case Types.REAL:
-          parameters.put(param.getParameterName(), tf.createDouble(((CallableStatement) pstmt).getDouble(pos)));
-          break;
-        case Types.DATE:
-          parameters.put(param.getParameterName(), tf.createDate(((CallableStatement) pstmt).getDate(pos)));
-          break;
-        case Types.TIME:
-          parameters.put(param.getParameterName(), tf.createTime(((CallableStatement) pstmt).getTime(pos)));
-          break;
-        case Types.TIMESTAMP:
-          parameters.put(param.getParameterName(), tf.createDateTime(((CallableStatement) pstmt).getTimestamp(pos)));
-          break;
-        case Types.BIGINT:
-        case Types.INTEGER:
-        case Types.SMALLINT:
-        case Types.TINYINT:
-          parameters.put(param.getParameterName(), tf.createLong(((CallableStatement) pstmt).getLong(pos)));
-          break;
-        case Types.BIT:
-        case Types.BOOLEAN:
-          parameters.put(param.getParameterName(), tf.createBoolean(((CallableStatement) pstmt).getBoolean(pos)));
-          break;
-        default:
-          LOG.debug("The datatype " + param.getSQLDataType() + " for output parameter " + param.getParameterName() +
-            " + is not supported.");
+        if (param.isOutput()) {
+          LOG.debug(functionName + " registering output " + param.getParameterName());
+          ((CallableStatement) pstmt).registerOutParameter(paramIndex, param.getSQLDataType());
         }
       }
-      pos++;
+
+      perf.track(Metric.PREPARE);
+
+      // execution
+      boolean hasResultSet = pstmt.execute();
+
+      perf.track(Metric.EXECUTE);
+
+      // parameters
+      AppianObject parameters = (AppianObject) tf.createElement(AppianType.DICTIONARY);
+      long totalRowCount = 0;
+      int pos = 1;
+
+      for (ProcedureParameter param : validatedParameters) {
+        if (param.isOutput()) {
+          if (((CallableStatement) pstmt).getObject(pos) == null) {
+            parameters.put(param.getParameterName(), null);
+            continue;
+          }
+
+          switch (param.getSQLDataType()) {
+            case Types.VARCHAR:
+            case Types.NVARCHAR:
+            case Types.NCHAR:
+            case Types.CHAR:
+            case Types.LONGNVARCHAR:
+            case Types.LONGVARCHAR:
+              parameters.put(param.getParameterName(), tf.createString(((CallableStatement) pstmt).getString(pos)));
+              break;
+            case Types.DECIMAL:
+            case Types.DOUBLE:
+            case Types.FLOAT:
+            case Types.NUMERIC:
+            case Types.REAL:
+              parameters.put(param.getParameterName(), tf.createDouble(((CallableStatement) pstmt).getDouble(pos)));
+              break;
+            case Types.DATE:
+              parameters.put(param.getParameterName(), tf.createDate(((CallableStatement) pstmt).getDate(pos)));
+              break;
+            case Types.TIME:
+              parameters.put(param.getParameterName(), tf.createTime(((CallableStatement) pstmt).getTime(pos)));
+              break;
+            case Types.TIMESTAMP:
+              parameters.put(param.getParameterName(), tf.createDateTime(((CallableStatement) pstmt).getTimestamp(pos)));
+              break;
+            case Types.BIGINT:
+            case Types.INTEGER:
+            case Types.SMALLINT:
+            case Types.TINYINT:
+              parameters.put(param.getParameterName(), tf.createLong(((CallableStatement) pstmt).getLong(pos)));
+              break;
+            case Types.BIT:
+            case Types.BOOLEAN:
+              parameters.put(param.getParameterName(), tf.createBoolean(((CallableStatement) pstmt).getBoolean(pos)));
+              break;
+            default:
+              LOG.debug("The datatype " + param.getSQLDataType() + " for output parameter " + param.getParameterName() +
+                      " + is not supported.");
+          }
+        }
+        pos++;
+      }
+
+      returnValue.put("parameters", parameters);
+
+      // results
+      AppianList resultList = tf.createList(AppianType.VARIANT);
+
+      if (hasResultSet) {
+        AppianList list = getProcedureResultSet(pstmt, tf, functionName);
+
+        totalRowCount += list.size();
+
+        resultList.add(list);
+      }
+
+      returnValue.put("result", resultList);
+
+      // Commit the save point
+      conn.commit();
+
+      TypedValue ret = tf.toTypedValue(returnValue);
+
+      perf.track(Metric.TRANSFORM);
+      perf.trackRowCount(totalRowCount);
+
+      perf.finish();
+
+      return ret;
+    } catch (Exception e) {
+      LOG.error("Error executing: ", e);
+      returnValue.put("success", tf.createBoolean(false));
+      returnValue.put("error", tf.createString(perf.error(e)));
+      returnValue.put("parameters", emptyResults);
+      returnValue.put("result", emptyResults);
+      return tf.toTypedValue(returnValue);
     }
-
-    returnValue.put("parameters", parameters);
-
-    // results
-    AppianList resultList = tf.createList(AppianType.VARIANT);
-
-    if (hasResultSet) {
-      AppianList list = getProcedureResultSet(pstmt, tf, functionName);
-
-      totalRowCount += list.size();
-
-      resultList.add(list);
-    }
-
-    returnValue.put("result", resultList);
-
-    // Commit the save point
-    conn.commit();
-
-    TypedValue ret = tf.toTypedValue(returnValue);
-
-    perf.track(Metric.TRANSFORM);
-    perf.trackRowCount(totalRowCount);
-
-    return ret;
-
   }
 
   private void setParameters(List<ProcedureParameter> parameterList) {
@@ -273,163 +290,172 @@ public class ExecuteStoredProcedureFunction {
   }
 
   private TypedValue executeStoredProcedure(Connection conn, PerformanceTracker perf, AppianTypeFactory tf, AppianObject returnValue,
-    String procedureName, ProcedureInput[] inputs) throws Exception {
+    String procedureName, ProcedureInput[] inputs, Integer timeout) throws Exception {
     perf.track(Metric.DS_GET_CONNECTION);
 
-    // Validate that the function can see the stored procedure and has all mappings
-    List<ProcedureParameter> parameterList = validate(procedureName, conn, inputs);
-    returnValue.put("success", tf.createBoolean(true));
-    returnValue.put("error", tf.createString(""));
+      // Validate that the function can see the stored procedure and has all mappings
+      List<ProcedureParameter> parameterList = validate(procedureName, conn, inputs);
+      returnValue.put("success", tf.createBoolean(true));
+      returnValue.put("error", tf.createString(""));
 
-    perf.track(Metric.VALIDATE);
-    conn.setAutoCommit(false);
+    try (CallableStatement call = conn.prepareCall("{call " + procedureName + "(" + getParameters(parameterList) + ")}")){
+      perf.track(Metric.VALIDATE);
+      conn.setAutoCommit(false);
 
-    // Start a transaction save point
-    Savepoint save = conn.setSavepoint();
+      // Start a transaction save point
+      Savepoint save = conn.setSavepoint();
+      call.setQueryTimeout(timeout);
 
-    // create a CallableStatement, set the inputs/outputs
-    CallableStatement call = conn.prepareCall("{call " + procedureName + "(" + getParameters(parameterList) + ")}");
+      for (int i = 0; i < parameterList.size(); i++) {
+        int paramIndex = i + 1;
+        ProcedureParameter param = parameterList.get(i);
 
-    for (int i = 0; i < parameterList.size(); i++) {
-      int paramIndex = i + 1;
-      ProcedureParameter param = parameterList.get(i);
-
-      if (param.isInput()) {
-        if (param.getValue() == null) {
-          LOG.debug(procedureName + " setting input " + param.getParameterName() + " as null");
-          call.setNull(paramIndex, param.getSQLDataType());
-        } else {
-          LOG.debug(procedureName + " setting input " + param.getParameterName() + " to " + param.getValue());
-          if (param.getValue() instanceof XMLGregorianCalendar) {
-            XMLGregorianCalendar cal = (XMLGregorianCalendar) param.getValue();
-
-            Timestamp timestamp = new Timestamp(cal.toGregorianCalendar().getTimeInMillis());
-
-            call.setObject(paramIndex, timestamp);
+        if (param.isInput()) {
+          if (param.getValue() == null) {
+            LOG.debug(procedureName + " setting input " + param.getParameterName() + " as null");
+            call.setNull(paramIndex, param.getSQLDataType());
           } else {
-            call.setObject(paramIndex, param.getValue());
+            LOG.debug(procedureName + " setting input " + param.getParameterName() + " to " + param.getValue());
+            if (param.getValue() instanceof XMLGregorianCalendar) {
+              XMLGregorianCalendar cal = (XMLGregorianCalendar) param.getValue();
+
+              Timestamp timestamp = new Timestamp(cal.toGregorianCalendar().getTimeInMillis());
+
+              call.setObject(paramIndex, timestamp);
+            } else {
+              call.setObject(paramIndex, param.getValue());
+            }
           }
         }
-      }
 
-      if (param.isOutput()) {
-        LOG.debug(procedureName + " registering output " + param.getParameterName());
-        call.registerOutParameter(paramIndex, param.getSQLDataType());
-      }
-    }
-
-    perf.track(Metric.PREPARE);
-
-    // execution
-    boolean hasResultSet = call.execute();
-
-    perf.track(Metric.EXECUTE);
-
-    // parameters
-    AppianObject parameters = (AppianObject) tf.createElement(AppianType.DICTIONARY);
-    long totalRowCount = 0;
-    int pos = 1;
-
-    for (ProcedureParameter param : parameterList) {
-      if (param.isOutput()) {
-        if (call.getObject(pos) == null) {
-          parameters.put(param.getParameterName(), null);
-          continue;
-        }
-
-        switch (param.getSQLDataType()) {
-        case Types.VARCHAR:
-        case Types.NVARCHAR:
-        case Types.NCHAR:
-        case Types.CHAR:
-        case Types.LONGNVARCHAR:
-        case Types.LONGVARCHAR:
-          parameters.put(param.getParameterName(), tf.createString(call.getString(pos)));
-          break;
-        case Types.DECIMAL:
-        case Types.DOUBLE:
-        case Types.FLOAT:
-        case Types.NUMERIC:
-        case Types.REAL:
-          parameters.put(param.getParameterName(), tf.createDouble(call.getDouble(pos)));
-          break;
-        case Types.DATE:
-          parameters.put(param.getParameterName(), tf.createDate(call.getDate(pos)));
-          break;
-        case Types.TIME:
-          parameters.put(param.getParameterName(), tf.createTime(call.getTime(pos)));
-          break;
-        case Types.TIMESTAMP:
-          parameters.put(param.getParameterName(), tf.createDateTime(call.getTimestamp(pos)));
-          break;
-        case Types.BIGINT:
-        case Types.INTEGER:
-        case Types.SMALLINT:
-        case Types.TINYINT:
-          parameters.put(param.getParameterName(), tf.createLong(call.getLong(pos)));
-          break;
-        case Types.BIT:
-        case Types.BOOLEAN:
-          parameters.put(param.getParameterName(), tf.createBoolean(call.getBoolean(pos)));
-          break;
-        case TYPE_ORACLE_CURSOR:
-          AppianList resultset = getResultSet((ResultSet) call.getObject(pos), tf, procedureName);
-
-          totalRowCount += resultset.size();
-
-          parameters.put(param.getParameterName(), resultset);
-          break;
-        default:
-          LOG.debug("The datatype " + param.getSQLDataType() + " for output parameter " + param.getParameterName() +
-            " + is not supported.");
+        if (param.isOutput()) {
+          LOG.debug(procedureName + " registering output " + param.getParameterName());
+          call.registerOutParameter(paramIndex, param.getSQLDataType());
         }
       }
-      pos++;
-    }
 
-    returnValue.put("parameters", parameters);
+      perf.track(Metric.PREPARE);
 
-    // results
-    AppianList resultList = tf.createList(AppianType.VARIANT);
+      // execution
+      boolean hasResultSet = call.execute();
 
-    if (hasResultSet) {
-      AppianList list = getProcedureResultSet(call, tf, procedureName);
+      perf.track(Metric.EXECUTE);
 
-      totalRowCount += list.size();
+      // parameters
+      AppianObject parameters = (AppianObject) tf.createElement(AppianType.DICTIONARY);
+      long totalRowCount = 0;
+      int pos = 1;
 
-      resultList.add(list);
-    }
+      for (ProcedureParameter param : parameterList) {
+        if (param.isOutput()) {
+          if (call.getObject(pos) == null) {
+            parameters.put(param.getParameterName(), null);
+            continue;
+          }
 
-    // Loop through results (make sure user isn't writing data, rollback if so)
-    while (true) {
-      if (call.getMoreResults()) {
+          switch (param.getSQLDataType()) {
+            case Types.VARCHAR:
+            case Types.NVARCHAR:
+            case Types.NCHAR:
+            case Types.CHAR:
+            case Types.LONGNVARCHAR:
+            case Types.LONGVARCHAR:
+              parameters.put(param.getParameterName(), tf.createString(call.getString(pos)));
+              break;
+            case Types.DECIMAL:
+            case Types.DOUBLE:
+            case Types.FLOAT:
+            case Types.NUMERIC:
+            case Types.REAL:
+              parameters.put(param.getParameterName(), tf.createDouble(call.getDouble(pos)));
+              break;
+            case Types.DATE:
+              parameters.put(param.getParameterName(), tf.createDate(call.getDate(pos)));
+              break;
+            case Types.TIME:
+              parameters.put(param.getParameterName(), tf.createTime(call.getTime(pos)));
+              break;
+            case Types.TIMESTAMP:
+              parameters.put(param.getParameterName(), tf.createDateTime(call.getTimestamp(pos)));
+              break;
+            case Types.BIGINT:
+            case Types.INTEGER:
+            case Types.SMALLINT:
+            case Types.TINYINT:
+              parameters.put(param.getParameterName(), tf.createLong(call.getLong(pos)));
+              break;
+            case Types.BIT:
+            case Types.BOOLEAN:
+              parameters.put(param.getParameterName(), tf.createBoolean(call.getBoolean(pos)));
+              break;
+            case TYPE_ORACLE_CURSOR:
+              AppianList resultset = getResultSet((ResultSet) call.getObject(pos), tf, procedureName);
+
+              totalRowCount += resultset.size();
+
+              parameters.put(param.getParameterName(), resultset);
+              break;
+            default:
+              LOG.debug("The datatype " + param.getSQLDataType() + " for output parameter " + param.getParameterName() +
+                      " + is not supported.");
+          }
+        }
+        pos++;
+      }
+
+      returnValue.put("parameters", parameters);
+
+      // results
+      AppianList resultList = tf.createList(AppianType.VARIANT);
+
+      if (hasResultSet) {
         AppianList list = getProcedureResultSet(call, tf, procedureName);
 
         totalRowCount += list.size();
 
         resultList.add(list);
-      } else if (call.getUpdateCount() > 0) {
-        conn.rollback(save);
-
-        throw new Exception(
-          "Use the Execute Stored Procedure Smart Service to modify data. This function must only be used to query data, not modify.");
-      } else if (call.getUpdateCount() < 0) {
-        // nothing else to process
-        break;
       }
+
+      // Loop through results (make sure user isn't writing data, rollback if so)
+      while (true) {
+        if (call.getMoreResults()) {
+          AppianList list = getProcedureResultSet(call, tf, procedureName);
+
+          totalRowCount += list.size();
+
+          resultList.add(list);
+        } else if (call.getUpdateCount() > 0) {
+          conn.rollback(save);
+
+          throw new Exception(
+                  "Use the Execute Stored Procedure Smart Service to modify data. This function must only be used to query data, not modify.");
+        } else if (call.getUpdateCount() < 0) {
+          // nothing else to process
+          break;
+        }
+      }
+
+      returnValue.put("result", resultList);
+
+      // Commit the save point
+      conn.commit();
+
+      TypedValue ret = tf.toTypedValue(returnValue);
+
+      perf.track(Metric.TRANSFORM);
+      perf.trackRowCount(totalRowCount);
+
+      perf.finish();
+      return ret;
+    } catch (Throwable e) {
+      LOG.error("Error executing: ", e);
+      returnValue.put("success", tf.createBoolean(false));
+      returnValue.put("error", tf.createString(perf.error(e)));
+      returnValue.put("parameters", emptyResults);
+      returnValue.put("result", emptyResults);
+      return tf.toTypedValue(returnValue);
+
     }
-
-    returnValue.put("result", resultList);
-
-    // Commit the save point
-    conn.commit();
-
-    TypedValue ret = tf.toTypedValue(returnValue);
-
-    perf.track(Metric.TRANSFORM);
-    perf.trackRowCount(totalRowCount);
-
-    return ret;
   }
 
   private List<ProcedureParameter> validate(String procedureName, Connection conn, ProcedureInput[] inputs)
